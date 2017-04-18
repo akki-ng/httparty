@@ -556,7 +556,108 @@ module HTTParty
       options = ModuleInheritableAttributes.hash_deep_dup(default_options).merge(options)
       process_headers(options)
       process_cookies(options)
-      Request.new(http_method, path, options).perform(&block)
+      response = Request.new(http_method, path, options).perform(&block)
+      if response_unauthorized?(response) && (options['authTried'].present? == false)
+        return perform_request_after_cas_authentication(http_method, path, options, response, &block)
+      else
+        return response
+      end
+    end
+
+    def response_unauthorized?(response)
+      !!response && response.code == 401
+    end
+
+    def perform_request_after_cas_authentication(http_method, path, options, parentResp, &block)
+      p 'authenticating cas'
+
+      # return perform_request(Net::HTTP::Get, path, options, &block)
+      #
+      # cas_options = {}
+      # cas_options.merge! options
+      # p cas_options
+      # authHash = Hash.new
+      # authHash[:headers] = {"User-Agent" => "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_8_2) AppleWebKit/537.17 (KHTML, like Gecko) Chrome/24.0.1309.0 Safari/537.17"}
+      # m = cas_options.deep_merge! authHash
+      # p m
+      # cas_options['authTried'] = true
+      # p cas_options
+      # resp1 = self.post("https://crm.advancesuite.in:8443/cas/login", cas_options, &block)
+      # p resp1
+      # cookies(parse_set_cookie(resp1.header['set-cookie']))
+      # resp2 = self.post(path, cas_options, &block)
+
+      cas_options = {}
+      cas_options.merge! options
+      cas_options['authTried'] = true
+      tgt_resp = self.post("https://crm.advancesuite.in:8443/cas/v1/tickets", :body => options[:basic_auth],
+        :headers => {
+           'Content-Type' =>'application/x-www-form-urlencoded; charset=utf-8'
+        }
+      )
+
+      cookies(parse_set_cookie(tgt_resp.header['set-cookie']))
+      if tgt_resp.code == 201
+        tgt_location = tgt_resp.headers['location']
+        serviceUrl = base_uri()
+        if !serviceUrl.present?
+          serviceUrl = path
+        else
+          serviceUrl = serviceUrl + path
+        end
+
+        serice_ticket_resp = self.post(tgt_location, :body => {
+            "service" => serviceUrl
+          },
+          :headers => {
+             'Content-Type' =>'application/x-www-form-urlencoded; charset=utf-8'
+          }
+        )
+
+        if serice_ticket_resp.code == 200
+          query = options[:query]
+          if !query.present?
+            query = {}
+            options[:query] = query
+          end
+          query['ticket'] = serice_ticket_resp.body
+          p 'options'
+          p options
+          return perform_request(http_method, path, options, &block)
+        else
+          return parentResp
+        end
+        return parentResp
+      else
+        return parentResp;
+      end
+    end
+
+    def parse_set_cookie(all_cookies_string)
+      cookies = Hash.new
+
+      if all_cookies_string.present?
+        # single cookies are devided with comma
+        all_cookies_string.split(',').each {
+          # @type [String] cookie_string
+            |single_cookie_string|
+          # parts of single cookie are seperated by semicolon; first part is key and value of this cookie
+          # @type [String]
+          cookie_part_string  = single_cookie_string.strip.split(';')[0]
+          # remove whitespaces at beginning and end in place and split at '='
+          # @type [Array]
+          cookie_part         = cookie_part_string.strip.split('=')
+          # @type [String]
+          key                 = cookie_part[0]
+          # @type [String]
+          value               = cookie_part[1]
+
+          # add cookie to Hash
+          cookies[key] = value
+        }
+      end
+
+      cookies
     end
 
     def process_headers(options)
